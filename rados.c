@@ -12,6 +12,7 @@
 
 // install the librados-dev package to get this
 #include <radosstriper/libradosstriper.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <limits.h>
@@ -20,6 +21,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <stdint.h>
 
 void usage() {
 	printf("Usage:\n"
@@ -75,16 +77,22 @@ int do_ls(rados_ioctx_t ioctx) {
 
 
 int do_put(rados_striper_t striper, const char *key, const char *filename) {
-	int fd = open(filename, O_RDONLY);
-	/* stack should be big enough to hold this buf*/
 	char buf[BUFFSIZE];
+	struct stat sb;
 	int count;
 	int offset = 0;
+	int file_size;
+
+	int fd = open(filename, O_RDONLY);
+	/* stack should be big enough to hold this buf*/
+	
 	if (fd < 0) {
 		printf("error reading file %s", filename);
 		return -1;
 	}
 	count = BUFFSIZE;
+	fstat(fd,&sb);
+	file_size = sb.st_size;
 	while (count != 0 ) {
 		count = read(fd, buf, BUFFSIZE);
 		if (count < 0) {
@@ -97,21 +105,37 @@ int do_put(rados_striper_t striper, const char *key, const char *filename) {
 		}
 		rados_striper_write(striper, key, buf,count, offset);
 		offset += count;
+		printf("%d%%\r", offset*100/file_size);
+		fflush(stdout);
 	}
 	return 0;
 }
 
 
-int do_get(rados_striper_t striper, const char *key, const char *filename) {
+int do_get(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const char *filename) {
 	char buf[BUFFSIZE];
+	char numbuf[128];
 	int offset = 0;
 	int count = 0;
+	uint64_t file_size;
 	int fd = open(filename, O_WRONLY|O_CREAT|O_TRUNC, 0644);
 	if (fd < 0) {
 		printf("error writing file %s\n", filename);
 		return -1;
 	}
+
 	printf("getting key %s for file %s\n", key, filename);
+	char * sobj = malloc(strlen(key) + 17 + 1);
+	sprintf(sobj,"%s.%016d", key, 0);
+
+	if (rados_getxattr(ioctx, sobj, "striper.size", numbuf, 128) > 0) {
+		sscanf(numbuf, "%llu", &file_size);
+		if (file_size == 0)
+			goto out;
+	}
+	else
+		goto out;
+	
 	while (1) {
 		count = rados_striper_read(striper, key, buf, BUFFSIZE, offset);
 		if (count < 0) {
@@ -124,8 +148,12 @@ int do_get(rados_striper_t striper, const char *key, const char *filename) {
 		if (write(fd, buf, count) < 0)
 			break;
 		offset += count;
+		printf("%d%%\r", offset*100/file_size);
+		fflush(stdout);
 	}
+out:
 	close(fd);
+	free(sobj);
 	return 0;
 }
 
@@ -227,7 +255,7 @@ int main(int argc, const char **argv)
 	else if (is_upload == UPLOAD)
 		ret = do_put(striper, key, filename);
 	else if (is_upload == DONWLOAD)
-		ret = do_get(striper, key, filename);
+		ret = do_get(io_ctx, striper, key, filename);
 
 out:
 	if (striper) {
