@@ -36,21 +36,43 @@ void usage() {
 
 #define BUFFSIZE 2<<20 /* 2M */
 
+
+int is_head_object(const char * entry) {
+	const char *p;
+	if((p = strrchr(entry, '.')) != NULL) {
+		if (strncmp(p+1, "0000000000000000", 16) == 0)
+			return p-entry;
+	}
+	return 0;
+}
+
 int do_ls(rados_ioctx_t ioctx) {
 	int ret;
-	const char * entry;
+	const char *entry;
 	rados_list_ctx_t list_ctx;
+	char buf[128];
+	int length;
 	ret = rados_objects_list_open(ioctx, &list_ctx);
 	if (ret < 0) {
 		printf("error reading list");
 		return -1;
 	}	
+	printf("===striper objects list===\n");
 	while(rados_objects_list_next(list_ctx, &entry, NULL) != -ENOENT) {
-		printf("%s\n", entry);
+		if ((length = is_head_object(entry)) == 0)
+			continue;
+		memset(buf, 0, 128);
+		if (rados_getxattr(ioctx, entry, "striper.size", buf, 128) > 0) {
+			printf("%-10.*s|%-10s\n", length, entry, buf);
+		} else {
+			printf("can not get striper.size of %s", entry);
+		}
+		
 	}
 	
 	rados_objects_list_close(list_ctx);
 }
+
 
 int do_put(rados_striper_t striper, const char *key, const char *filename) {
 	int fd = open(filename, O_RDONLY);
