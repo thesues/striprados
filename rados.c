@@ -33,10 +33,12 @@ void usage() {
 			"./striprados -p poolname -l\n");
 }
 
-#define UPLOAD 1
+#define NOOPS -1
 #define DONWLOAD 0
+#define UPLOAD 1
+#define LIST     2
 
-#define BUFFSIZE 2<<20 /* 2M */
+#define BUFFSIZE 1<<20 /* 1M */
 
 
 int is_head_object(const char * entry) {
@@ -73,6 +75,7 @@ int do_ls(rados_ioctx_t ioctx) {
 	}
 	
 	rados_objects_list_close(list_ctx);
+	return 0;
 }
 
 
@@ -118,6 +121,9 @@ int do_get(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 	int offset = 0;
 	int count = 0;
 	uint64_t file_size;
+	memset(numbuf,0,128);
+	memset(buf,0,BUFFSIZE);
+
 	int fd = open(filename, O_WRONLY|O_CREAT|O_TRUNC, 0644);
 	if (fd < 0) {
 		printf("error writing file %s\n", filename);
@@ -129,7 +135,7 @@ int do_get(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 	sprintf(sobj,"%s.%016d", key, 0);
 
 	if (rados_getxattr(ioctx, sobj, "striper.size", numbuf, 128) > 0) {
-		sscanf(numbuf, "%llu", &file_size);
+		sscanf(numbuf, "%lu", &file_size);
 		if (file_size == 0)
 			goto out;
 	}
@@ -148,7 +154,7 @@ int do_get(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 		if (write(fd, buf, count) < 0)
 			break;
 		offset += count;
-		printf("%d%%\r", offset*100/file_size);
+		printf("%ld%%\r", offset*100/file_size);
 		fflush(stdout);
 	}
 out:
@@ -162,13 +168,11 @@ int main(int argc, const char **argv)
 {
 
 	int opt;
-	int is_upload; 
 	char *pool_name = NULL;
 	char *key = NULL;
 	const char *filename = NULL;
 	int ret = 0;
-	int i = 0;
-	int ls = 0;    
+	int action = NOOPS;
 
 	while ((opt = getopt(argc, (char* const *) argv, "p:k:g:l")) != -1) {
 		switch (opt) {
@@ -176,15 +180,15 @@ int main(int argc, const char **argv)
 				pool_name = optarg;
 				break;
 			case 'k':
-				is_upload = UPLOAD;
+				action = UPLOAD;
 				key = optarg;
 				break;
 			case 'g':
-				is_upload = DONWLOAD;
+				action = DONWLOAD;
 				key = optarg;
 				break;
 			case 'l':
-				ls = 1;
+				action = LIST;
 				break;
 			default:
 				usage();
@@ -192,7 +196,7 @@ int main(int argc, const char **argv)
 		}
 	}
 
-	if (!ls) {
+	if (action == UPLOAD || action  == DONWLOAD) {
 		if (argc == optind + 1) {
 			filename = argv[optind];
 		} else {
@@ -200,8 +204,7 @@ int main(int argc, const char **argv)
 			return EXIT_FAILURE;
 		}
 
-
-	}	
+	}
 
 	rados_ioctx_t io_ctx = NULL;
 	rados_striper_t striper = NULL;
@@ -250,12 +253,20 @@ int main(int argc, const char **argv)
 	rados_striper_set_object_layout_stripe_count(striper, 4);
 
 
-	if(ls) 
-		ret = do_ls(io_ctx);
-	else if (is_upload == UPLOAD)
-		ret = do_put(striper, key, filename);
-	else if (is_upload == DONWLOAD)
-		ret = do_get(io_ctx, striper, key, filename);
+	switch (action) {
+		case LIST:
+			do_ls(io_ctx);
+			break;
+		case UPLOAD:
+			do_put(striper, key, filename);
+			break;
+		case DONWLOAD:
+			do_get(io_ctx, striper, key, filename);
+			break; 
+		default:
+			printf("wrong action\n");
+			goto out;
+	}
 
 out:
 	if (striper) {
