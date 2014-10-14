@@ -19,6 +19,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <errno.h>
 
 void usage() {
 	printf("Usage:\n"
@@ -35,11 +36,23 @@ void usage() {
 
 #define BUFFSIZE 2<<20 /* 2M */
 
-int do_ls() {
-
+int do_ls(rados_ioctx_t ioctx) {
+	int ret;
+	const char * entry;
+	rados_list_ctx_t list_ctx;
+	ret = rados_objects_list_open(ioctx, &list_ctx);
+	if (ret < 0) {
+		printf("error reading list");
+		return -1;
+	}	
+	while(rados_objects_list_next(list_ctx, &entry, NULL) != -ENOENT) {
+		printf("%s\n", entry);
+	}
+	
+	rados_objects_list_close(list_ctx);
 }
 
-int do_put(rados_striper_t striper, char *key, char *filename) {
+int do_put(rados_striper_t striper, const char *key, const char *filename) {
 	int fd = open(filename, O_RDONLY);
 	/* stack should be big enough to hold this buf*/
 	char buf[BUFFSIZE];
@@ -67,7 +80,7 @@ int do_put(rados_striper_t striper, char *key, char *filename) {
 }
 
 
-int do_get(rados_striper_t striper, char *key, char *filename) {
+int do_get(rados_striper_t striper, const char *key, const char *filename) {
 	char buf[BUFFSIZE];
 	int offset = 0;
 	int count = 0;
@@ -102,12 +115,12 @@ int main(int argc, const char **argv)
 	int is_upload; 
 	char *pool_name = NULL;
 	char *key = NULL;
-	char *filename = NULL;
+	const char *filename = NULL;
 	int ret = 0;
 	int i = 0;
 	int ls = 0;    
 
-	while ((opt = getopt(argc, argv, "p:k:g:l")) != -1) {
+	while ((opt = getopt(argc, (char* const *) argv, "p:k:g:l")) != -1) {
 		switch (opt) {
 			case 'p':
 				pool_name = optarg;
@@ -129,7 +142,6 @@ int main(int argc, const char **argv)
 		}
 	}
 
-	printf("argc %d, optind %d\n", argc, optind);
 	if (!ls) {
 		if (argc == optind + 1) {
 			filename = argv[optind];
@@ -189,7 +201,7 @@ int main(int argc, const char **argv)
 
 
 	if(ls) 
-		ret = do_ls(striper);
+		ret = do_ls(io_ctx);
 	else if (is_upload == UPLOAD)
 		ret = do_put(striper, key, filename);
 	else if (is_upload == DONWLOAD)
