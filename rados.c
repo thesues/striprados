@@ -38,7 +38,7 @@ void usage() {
 #define UPLOAD 1
 #define LIST     2
 
-#define BUFFSIZE 1<<20 /* 1M */
+#define BUFFSIZE 64<<20 /* 64M */
 
 
 int is_head_object(const char * entry) {
@@ -78,13 +78,95 @@ int do_ls(rados_ioctx_t ioctx) {
 	return 0;
 }
 
+/* aio */
+int do_put2(rados_striper_t striper, const char *key, const char *filename, uint16_t concurrent) {
+	
+	uint16_t i = 0 ;
+	int ret = 0;
+	char **buf_list = malloc(concurrent * sizeof(char *));
+	uint64_t count = 0;
+	uint64_t offset = 0;
+	if (buf_list == NULL) {
+		printf("calloc failed\n");
+		return -1;
+	}
 
+	for(i = 0 ; i < concurrent; i++) {
+		buf_list[i] = calloc(1, BUFFSIZE);
+		if (buf_list[i] == NULL) {
+			printf("calloc failed\n");
+			ret = -1;
+			goto out;
+		}
+	}
+
+
+	int fd = open(filename, O_RDONLY);
+	if (fd < 0) {
+		printf("error reading file %s", filename);
+		ret = -1;
+		goto out;
+	}
+
+	rados_completion_t *completion_list = calloc(concurrent ,  sizeof(rados_completion_t));
+	if (completion_list == NULL) {
+		goto out1;
+	}
+
+	for (i = 0 ; i < concurrent ; i ++ )
+		if (rados_aio_create_completion(NULL, NULL, NULL, &completion_list[i]) < 0 )
+			goto out3;
+
+	count = BUFFSIZE;
+	while (count != 0 ) {
+		for (i = 0 ; i < concurrent; i ++) {
+			count = read(fd, buf_list[i], BUFFSIZE);
+			if (count < 0) {
+				printf("read file failed\n");
+				ret = -1;
+				goto out2;
+				
+			}
+			if (count == 0) {
+				ret = 0;
+				goto out2;
+			}
+			rados_striper_aio_write(striper, key, completion_list[i], buf_list[i], count, offset);
+			offset += count;
+		}
+		for(i = 0 ; i < concurrent ; i++) 
+			rados_aio_wait_for_complete(completion_list[i]);
+
+		printf("%lld\r", offset);
+		fflush(stdout);
+	}
+
+out3:
+	for(i = 0; i < concurrent; i++) {
+		if(completion_list[i] != NULL)
+			rados_aio_release(completion_list[i]);
+	}
+out2:
+	free(completion_list);
+	
+out1:
+	close(fd);
+out:
+	for(i = 0 ; i < concurrent; i++) {
+		if (buf_list[i] != NULL)
+			free(buf_list[i]);
+	}
+	free(buf_list);
+	return ret;
+}
+
+/* sync io */
 int do_put(rados_striper_t striper, const char *key, const char *filename) {
-	char buf[BUFFSIZE];
+	char *buf = (char*)malloc(BUFFSIZE);
 	struct stat sb;
 	int count;
-	int offset = 0;
-	int file_size;
+	uint64_t offset = 0;
+	uint64_t file_size;
 
 	int fd = open(filename, O_RDONLY);
 	/* stack should be big enough to hold this buf*/
@@ -100,29 +182,31 @@ int do_put(rados_striper_t striper, const char *key, const char *filename) {
 		count = read(fd, buf, BUFFSIZE);
 		if (count < 0) {
 			close(fd);
-			return -1;
+			break;
 		}
 		if (count == 0) {
 			close(fd);
 			break;
 		}
-		rados_striper_write(striper, key, buf,count, offset);
+		rados_striper_write(striper, key, buf, count, offset);
 		offset += count;
-		printf("%d%%\r", offset*100/file_size);
+		printf("%lu%%\r", offset*100/file_size);
 		fflush(stdout);
 	}
+	free(buf);
 	return 0;
 }
 
 
 int do_get(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const char *filename) {
-	char buf[BUFFSIZE];
+
+	char *buf = malloc(BUFFSIZE);
 	char numbuf[128];
-	int offset = 0;
+	uint64_t offset = 0;
 	int count = 0;
 	uint64_t file_size;
-	memset(numbuf,0,128);
-	memset(buf,0,BUFFSIZE);
+	memset(numbuf, 0, 128);
+	memset(buf, 0, BUFFSIZE);
 
 	int fd = open(filename, O_WRONLY|O_CREAT|O_TRUNC, 0644);
 	if (fd < 0) {
@@ -138,8 +222,7 @@ int do_get(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 		sscanf(numbuf, "%lu", &file_size);
 		if (file_size == 0)
 			goto out;
-	}
-	else
+	} else
 		goto out;
 	
 	while (1) {
@@ -154,11 +237,12 @@ int do_get(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 		if (write(fd, buf, count) < 0)
 			break;
 		offset += count;
-		printf("%ld%%\r", offset*100/file_size);
+		printf("%lld%%\r", offset*100/file_size);
 		fflush(stdout);
 	}
 out:
 	close(fd);
+	free(buf);
 	free(sobj);
 	return 0;
 }
@@ -197,13 +281,17 @@ int main(int argc, const char **argv)
 	}
 
 	if (action == UPLOAD || action  == DONWLOAD) {
-		if (argc == optind + 1) {
+		if (argc == optind + 1 && pool_name) {
 			filename = argv[optind];
 		} else {
 			usage();
 			return EXIT_FAILURE;
 		}
-
+	} else if (action == LIST && pool_name) {
+		
+	} else {
+			usage();
+			return EXIT_FAILURE;
 	}
 
 	rados_ioctx_t io_ctx = NULL;
@@ -216,7 +304,7 @@ int main(int argc, const char **argv)
 		ret = EXIT_FAILURE;
 		goto out;
 	}
-	printf("we just set up a rados cluster object\n");
+	printf("just set up a rados cluster object\n");
 
 	ret = rados_conf_read_file(rados, "/etc/ceph/ceph.conf");
 
@@ -248,9 +336,9 @@ int main(int argc, const char **argv)
 	}
 
 
-	rados_striper_set_object_layout_stripe_unit(striper, 512<<10);  /* 512K */
-	rados_striper_set_object_layout_object_size(striper, 4<<20); /* 4M */
-	rados_striper_set_object_layout_stripe_count(striper, 4);
+	rados_striper_set_object_layout_stripe_unit(striper, 128<<10);
+	rados_striper_set_object_layout_object_size(striper, 8<<20);
+	rados_striper_set_object_layout_stripe_count(striper, 128);
 
 
 	switch (action) {
@@ -258,7 +346,7 @@ int main(int argc, const char **argv)
 			do_ls(io_ctx);
 			break;
 		case UPLOAD:
-			do_put(striper, key, filename);
+			do_put2(striper, key, filename, 4);
 			break;
 		case DONWLOAD:
 			do_get(io_ctx, striper, key, filename);
