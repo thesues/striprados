@@ -22,6 +22,7 @@
 #include <fcntl.h>
 #include <errno.h>
 #include <stdint.h>
+#include <semaphore.h>
 
 void usage() {
 	printf("Usage:\n"
@@ -33,12 +34,24 @@ void usage() {
 			"./striprados -p poolname -l\n");
 }
 
+/*
 #define NOOPS -1
 #define DONWLOAD 0
 #define UPLOAD 1
 #define LIST     2
+#define DELETE
+#define INFO
+*/
+enum act {
+ NOOPS = -1,
+ DONWLOAD,
+ UPLOAD,
+ LIST ,
+ DELETE,
+ INFO
+};
 
-#define BUFFSIZE 64<<20 /* 64M */
+#define BUFFSIZE 2<<20 /* 2M */
 
 
 int is_head_object(const char * entry) {
@@ -78,29 +91,137 @@ int do_ls(rados_ioctx_t ioctx) {
 	return 0;
 }
 
+struct buffer_manager {
+	char ** free_buf;
+	int index;
+	int max_buf_num;
+	int current_buf_num;
+	sem_t mutex;
+	sem_t available_bufs;
+};
+
+
+int init_buffer_manager(struct buffer_manager *bm, int concurrent) {
+	/* concurrent must >= 1 */
+	int ret;
+	bm->free_buf = (char **)calloc(concurrent , sizeof(char*));
+	if (bm->free_buf == NULL) {
+		printf("failed to allocate free buffer manager\n");
+		return -1;
+	}
+	bm->free_buf[0] = calloc(BUFFSIZE, sizeof(char));
+
+	if (bm->free_buf[0] == NULL) {
+		printf("failed to allocate the first buffer\n");
+		ret = -1;
+		goto out;
+	}
+	bm->index = 0;
+	bm->max_buf_num = concurrent;
+	/* point to the last available buffer slot */
+	bm->current_buf_num = 0;
+	
+	/* initial mutex */
+	if (sem_init(&bm->mutex, 0, 1) != 0) {
+		ret = -errno;
+		goto out1;
+		
+	}
+	/* initial available_bufs */
+	if (sem_init(&bm->available_bufs, 0, concurrent) != 0 ) {
+		ret = -errno;
+		goto out2;
+	}
+
+	return 0;
+
+out2:
+	sem_destroy(&bm->mutex);
+out1:
+	free(bm->free_buf[0]);
+out:
+	free(bm->free_buf);
+	return ret;
+	
+}
+
+/* we must be sure that all buffer has been reclaimed by put_buffer_back */
+void destory_buffer_manager(struct buffer_manager *bm) {
+	int i;
+	for (i = 0 ; i < bm->current_buf_num ; i++) {
+		free(bm->free_buf[i]);
+	}
+	free(bm->free_buf);
+	sem_destroy(&bm->mutex);
+	sem_destroy(&bm->available_bufs);
+}
+
+
+char* get_free_buffer(struct buffer_manager *bm) {
+	/*bm->index will always equal to sem_value(&bm->available_bufs) - 1 */
+	sem_wait(&bm->available_bufs);
+	/* There is available_bufs for me to use */
+	/* now to manapulate the free buf list */
+	sem_wait(&bm->mutex);
+	/* lazy allocate buffer */
+
+	if (bm->current_buf_num < bm->max_buf_num && bm->index < 0) {
+		bm->index++ ;
+		bm->free_buf[bm->index] = calloc(BUFFSIZE, sizeof(char));
+		if (bm->free_buf[bm->index] == NULL) {
+			sem_post(&bm->mutex);
+			sem_post(&bm->available_bufs);
+			return NULL;
+		}
+		bm->current_buf_num ++;
+	}
+
+	/* user used a buffer */
+	bm->index-- ;
+	sem_post(&bm->mutex);
+	printf("index %d\n", bm->index + 1);
+	return bm->free_buf[bm->index + 1];
+}
+
+void put_buffer_back(struct buffer_manager *bm, char *buf) {
+	sem_wait(&bm->mutex);
+	bm->index++;
+	bm->free_buf[bm->index] = buf;
+	sem_post(&bm->mutex);
+
+	sem_post(&bm->available_bufs);
+}
+
+struct buffer_manager bm;
+
+void set_completion_complete(rados_completion_t cb, void *arg)
+{
+	printf("running callback\n");
+	char *buf = (char*)arg;
+	put_buffer_back(&bm, buf);
+	//rados_aio_release(cb);
+	printf("finishing callback\n");
+}
+
+
+
 /* aio */
 int do_put2(rados_striper_t striper, const char *key, const char *filename, uint16_t concurrent) {
 	
-	uint16_t i = 0 ;
 	int ret = 0;
-	char **buf_list = malloc(concurrent * sizeof(char *));
 	uint64_t count = 0;
 	uint64_t offset = 0;
-	if (buf_list == NULL) {
-		printf("calloc failed\n");
+	uint32_t num_writes = 0;
+	char *buf = NULL;
+	rados_completion_t my_completion;
+
+	ret = init_buffer_manager(&bm, concurrent);
+
+	if (ret < 0) {
+		printf("failed to create buffer_manager\n");
 		return -1;
 	}
-
-	for(i = 0 ; i < concurrent; i++) {
-		buf_list[i] = calloc(1, BUFFSIZE);
-		if (buf_list[i] == NULL) {
-			printf("calloc failed\n");
-			ret = -1;
-			goto out;
-		}
-	}
-
-
+	
 	int fd = open(filename, O_RDONLY);
 	if (fd < 0) {
 		printf("error reading file %s", filename);
@@ -108,55 +229,52 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 		goto out;
 	}
 
-	rados_completion_t *completion_list = calloc(concurrent ,  sizeof(rados_completion_t));
-	if (completion_list == NULL) {
-		goto out1;
-	}
-
-	for (i = 0 ; i < concurrent ; i ++ )
-		if (rados_aio_create_completion(NULL, NULL, NULL, &completion_list[i]) < 0 )
-			goto out3;
-
 	count = BUFFSIZE;
 	while (count != 0 ) {
-		for (i = 0 ; i < concurrent; i ++) {
-			count = read(fd, buf_list[i], BUFFSIZE);
-			if (count < 0) {
-				printf("read file failed\n");
-				ret = -1;
-				goto out2;
-				
-			}
-			if (count == 0) {
-				ret = 0;
-				goto out2;
-			}
-			rados_striper_aio_write(striper, key, completion_list[i], buf_list[i], count, offset);
-			offset += count;
+
+		/* it may block */
+		printf("get\n");
+		buf = get_free_buffer(&bm);
+		printf("got\n");
+
+		/* can not allocate new buffer lazily, continue */
+		if (buf == NULL) {
+			printf("failed to get buf\n");
+			continue;
 		}
-		for(i = 0 ; i < concurrent ; i++) 
-			rados_aio_wait_for_complete(completion_list[i]);
 
-		printf("%lld\r", offset);
+		count = read(fd, buf, BUFFSIZE);
+
+		if (count < 0) {
+			printf("failed to read from file\n");
+			ret = -1;
+			break;
+		}
+
+		if (count == 0) {
+			ret = 0;
+			break;
+		}
+
+
+		num_writes++;
+		/*TODO somewhere to store the completion */
+		rados_aio_create_completion((void *)buf, set_completion_complete, NULL, &my_completion);
+		rados_striper_aio_write(striper, key, my_completion, buf, count, offset);
+
+		offset += count;
+		printf("%lu\n", offset);
 		fflush(stdout);
-	}
 
-out3:
-	for(i = 0; i < concurrent; i++) {
-		if(completion_list[i] != NULL)
-			rados_aio_release(completion_list[i]);
 	}
-out2:
-	free(completion_list);
 	
-out1:
+	rados_striper_aio_flush(striper);
+	/* flush all the completions */
+	
+
 	close(fd);
 out:
-	for(i = 0 ; i < concurrent; i++) {
-		if (buf_list[i] != NULL)
-			free(buf_list[i]);
-	}
-	free(buf_list);
+	destory_buffer_manager(&bm);
 	return ret;
 }
 
@@ -200,30 +318,41 @@ int do_put(rados_striper_t striper, const char *key, const char *filename) {
 
 int do_get(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const char *filename) {
 
-	char *buf = malloc(BUFFSIZE);
 	char numbuf[128];
 	uint64_t offset = 0;
 	int count = 0;
 	uint64_t file_size;
-	memset(numbuf, 0, 128);
-	memset(buf, 0, BUFFSIZE);
+	int ret = 0;
 
+	memset(numbuf, 0, 128);
 	int fd = open(filename, O_WRONLY|O_CREAT|O_TRUNC, 0644);
 	if (fd < 0) {
 		printf("error writing file %s\n", filename);
 		return -1;
 	}
 
-	printf("getting key %s for file %s\n", key, filename);
+	char *buf = malloc(BUFFSIZE);
+	if (buf == NULL) {
+		ret = -1;
+		goto out;
+	}
+	memset(buf, 0, BUFFSIZE);
+
+
 	char * sobj = malloc(strlen(key) + 17 + 1);
+	if (sobj == NULL) {
+		ret = -1;
+		goto out1;
+	}
+
 	sprintf(sobj,"%s.%016d", key, 0);
 
 	if (rados_getxattr(ioctx, sobj, "striper.size", numbuf, 128) > 0) {
 		sscanf(numbuf, "%lu", &file_size);
-		if (file_size == 0)
-			goto out;
-	} else
-		goto out;
+	} else {
+		ret = -1;
+		goto out2;
+	}
 	
 	while (1) {
 		count = rados_striper_read(striper, key, buf, BUFFSIZE, offset);
@@ -232,21 +361,44 @@ int do_get(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 			close(fd);
 			return -1;
 		}
-		if (count == 0)
+		if (count == 0) {
+			ret = 0;
 			break;
-		if (write(fd, buf, count) < 0)
-			break;
+		}
+		if (write(fd, buf, count) < 0){ 
+			ret = -1;
+			goto out2;
+		}
 		offset += count;
-		printf("%lld%%\r", offset*100/file_size);
+		printf("%lu%%\r", offset*100/file_size);
 		fflush(stdout);
 	}
+
+out2:
+	free(sobj);
+out1:	
+	free(buf);
 out:
 	close(fd);
-	free(buf);
-	free(sobj);
+	return ret;
+}
+
+int do_delete(rados_striper_t striper, const char *key) {
+	int ret;
+	printf("deleting %s\n",key);
+	ret = rados_striper_remove(striper, key);
+	if (ret < 0) {
+		printf("delete failed\n");
+		return -1;
+	}
+	printf("deleted\n");
 	return 0;
 }
 
+/* not implemetated */
+int do_info() {
+	return 0;
+}
 
 int main(int argc, const char **argv)
 {
@@ -256,9 +408,9 @@ int main(int argc, const char **argv)
 	char *key = NULL;
 	const char *filename = NULL;
 	int ret = 0;
-	int action = NOOPS;
+	enum act action = NOOPS;
 
-	while ((opt = getopt(argc, (char* const *) argv, "p:k:g:l")) != -1) {
+	while ((opt = getopt(argc, (char* const *) argv, "p:k:g:lr:i:")) != -1) {
 		switch (opt) {
 			case 'p':
 				pool_name = optarg;
@@ -274,6 +426,14 @@ int main(int argc, const char **argv)
 			case 'l':
 				action = LIST;
 				break;
+			case 'r':
+				action = DELETE;
+				key = optarg;
+				break;
+			case 'i':
+				action = INFO;
+				key = optarg;
+				break;
 			default:
 				usage();
 				return EXIT_FAILURE;
@@ -287,7 +447,7 @@ int main(int argc, const char **argv)
 			usage();
 			return EXIT_FAILURE;
 		}
-	} else if (action == LIST && pool_name) {
+	} else if ((action == LIST || action == DELETE || action == INFO )&& pool_name) {
 		
 	} else {
 			usage();
@@ -304,7 +464,7 @@ int main(int argc, const char **argv)
 		ret = EXIT_FAILURE;
 		goto out;
 	}
-	printf("just set up a rados cluster object\n");
+	printf("set up a rados cluster object\n");
 
 	ret = rados_conf_read_file(rados, "/etc/ceph/ceph.conf");
 
@@ -314,7 +474,7 @@ int main(int argc, const char **argv)
 		ret = EXIT_FAILURE;
 		goto out;
 	}
-	printf("we just connected to the rados cluster\n");
+	printf("connected to the rados cluster\n");
 
 
 	ret = rados_ioctx_create(rados, pool_name, &io_ctx);
@@ -323,7 +483,7 @@ int main(int argc, const char **argv)
 		ret = EXIT_FAILURE;
 		goto out;
 	} else {
-		printf("we just created an ioctx for our pool\n");
+		printf("created an ioctx for our pool\n");
 	}
 
 	ret = rados_striper_create(io_ctx, &striper);
@@ -332,7 +492,7 @@ int main(int argc, const char **argv)
 		ret = EXIT_FAILURE;
 		goto out;
 	} else {
-		printf("we just created a striper for our pool\n");
+		printf("created a striper for our pool\n");
 	}
 
 
@@ -343,16 +503,23 @@ int main(int argc, const char **argv)
 
 	switch (action) {
 		case LIST:
-			do_ls(io_ctx);
+			ret = do_ls(io_ctx);
 			break;
 		case UPLOAD:
-			do_put2(striper, key, filename, 4);
+			ret = do_put2(striper, key, filename,2);
 			break;
 		case DONWLOAD:
-			do_get(io_ctx, striper, key, filename);
+			ret = do_get(io_ctx, striper, key, filename);
 			break; 
+		case DELETE:
+			ret = do_delete(striper, key);
+			break;
+		case INFO:
+			ret = do_info(striper, key);
+			break;
 		default:
 			printf("wrong action\n");
+			ret = -1;
 			goto out;
 	}
 
