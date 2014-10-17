@@ -51,7 +51,7 @@ enum act {
  INFO
 };
 
-#define BUFFSIZE 2<<20 /* 2M */
+#define BUFFSIZE 64<<20 /* 64M */
 
 
 int is_head_object(const char * entry) {
@@ -179,7 +179,6 @@ char* get_free_buffer(struct buffer_manager *bm) {
 	/* user used a buffer */
 	bm->index-- ;
 	sem_post(&bm->mutex);
-	printf("index %d\n", bm->index + 1);
 	return bm->free_buf[bm->index + 1];
 }
 
@@ -196,11 +195,8 @@ struct buffer_manager bm;
 
 void set_completion_complete(rados_completion_t cb, void *arg)
 {
-	printf("running callback\n");
 	char *buf = (char*)arg;
 	put_buffer_back(&bm, buf);
-	//rados_aio_release(cb);
-	printf("finishing callback\n");
 }
 
 
@@ -209,11 +205,15 @@ void set_completion_complete(rados_completion_t cb, void *arg)
 int do_put2(rados_striper_t striper, const char *key, const char *filename, uint16_t concurrent) {
 	
 	int ret = 0;
+	int i;
 	uint64_t count = 0;
 	uint64_t offset = 0;
-	uint32_t num_writes = 0;
 	char *buf = NULL;
 	rados_completion_t my_completion;
+	#define COMPLETION_LIST_SIZE 256
+	rados_completion_t *completion_list = calloc(COMPLETION_LIST_SIZE, sizeof(rados_completion_t));
+	int32_t next_num_writes = 0;
+	uint32_t capacity = COMPLETION_LIST_SIZE;
 
 	ret = init_buffer_manager(&bm, concurrent);
 
@@ -233,9 +233,7 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 	while (count != 0 ) {
 
 		/* it may block */
-		printf("get\n");
 		buf = get_free_buffer(&bm);
-		printf("got\n");
 
 		/* can not allocate new buffer lazily, continue */
 		if (buf == NULL) {
@@ -257,9 +255,19 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 		}
 
 
-		num_writes++;
-		/*TODO somewhere to store the completion */
-		rados_aio_create_completion((void *)buf, set_completion_complete, NULL, &my_completion);
+		
+		/* use completion_list to store every completion_list  */
+		ret = rados_aio_create_completion((void *)buf, set_completion_complete, NULL, &my_completion);
+		if (ret < 0) {
+			printf("failed to create completion\n");
+			goto out1;
+		}
+		if (next_num_writes >= capacity) {
+			completion_list =  realloc(completion_list, capacity << 1);
+			capacity = capacity << 1;
+		}
+		completion_list[next_num_writes++] = my_completion;
+
 		rados_striper_aio_write(striper, key, my_completion, buf, count, offset);
 
 		offset += count;
@@ -268,10 +276,12 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 
 	}
 	
-	rados_striper_aio_flush(striper);
-	/* flush all the completions */
+out1:
+	for(i = 0 ; i < next_num_writes ; i ++) {
+		rados_aio_wait_for_safe(completion_list[i]);
+		rados_aio_release(completion_list[i]);
+	}
 	
-
 	close(fd);
 out:
 	destory_buffer_manager(&bm);
@@ -506,7 +516,7 @@ int main(int argc, const char **argv)
 			ret = do_ls(io_ctx);
 			break;
 		case UPLOAD:
-			ret = do_put2(striper, key, filename,2);
+			ret = do_put2(striper, key, filename, 4);
 			break;
 		case DONWLOAD:
 			ret = do_get(io_ctx, striper, key, filename);
