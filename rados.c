@@ -23,6 +23,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <semaphore.h>
+#include <assert.h>
 
 void usage() {
 	printf("Usage:\n"
@@ -163,8 +164,8 @@ char* get_free_buffer(struct buffer_manager *bm) {
 	/* There is available_bufs for me to use */
 	/* now to manapulate the free buf list */
 	sem_wait(&bm->mutex);
-	/* lazy allocate buffer */
 
+	/* lazy allocate buffer */
 	if (bm->current_buf_num < bm->max_buf_num && bm->index < 0) {
 		bm->index++ ;
 		bm->free_buf[bm->index] = calloc(BUFFSIZE, sizeof(char));
@@ -200,9 +201,8 @@ void set_completion_complete(rados_completion_t cb, void *arg)
 }
 
 
-
 /* aio */
-int do_put2(rados_striper_t striper, const char *key, const char *filename, uint16_t concurrent) {
+int do_put2(rados_striper_t striper, const char *key, const char *filename, uint16_t concurrent, int overwrite) {
 	
 	int ret = 0;
 	int i;
@@ -229,6 +229,8 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 		goto out;
 	}
 
+	if (overwrite == 1)
+		rados_striper_trunc(striper, key, 0);
 	count = BUFFSIZE;
 	while (count != 0 ) {
 
@@ -254,8 +256,6 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 			break;
 		}
 
-
-		
 		/* use completion_list to store every completion_list  */
 		ret = rados_aio_create_completion((void *)buf, set_completion_complete, NULL, &my_completion);
 		if (ret < 0) {
@@ -398,10 +398,10 @@ int do_delete(rados_striper_t striper, const char *key) {
 	printf("deleting %s\n",key);
 	ret = rados_striper_remove(striper, key);
 	if (ret < 0) {
-		printf("delete failed\n");
+		printf("%s delete failed\n", key);
 		return -1;
 	}
-	printf("deleted\n");
+	printf("%s deleted\n",key);
 	return 0;
 }
 
@@ -492,9 +492,8 @@ int main(int argc, const char **argv)
 		printf("couldn't set up ioctx! error %d\n", ret);
 		ret = EXIT_FAILURE;
 		goto out;
-	} else {
+	} else
 		printf("created an ioctx for our pool\n");
-	}
 
 	ret = rados_striper_create(io_ctx, &striper);
 	if (ret < 0) {
@@ -508,7 +507,7 @@ int main(int argc, const char **argv)
 
 	rados_striper_set_object_layout_stripe_unit(striper, 128<<10);
 	rados_striper_set_object_layout_object_size(striper, 8<<20);
-	rados_striper_set_object_layout_stripe_count(striper, 128);
+	rados_striper_set_object_layout_stripe_count(striper, 256);
 
 
 	switch (action) {
@@ -516,7 +515,7 @@ int main(int argc, const char **argv)
 			ret = do_ls(io_ctx);
 			break;
 		case UPLOAD:
-			ret = do_put2(striper, key, filename, 4);
+			ret = do_put2(striper, key, filename, 4, 0);
 			break;
 		case DONWLOAD:
 			ret = do_get(io_ctx, striper, key, filename);
