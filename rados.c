@@ -10,6 +10,8 @@
  * Copyright 2013 Inktank
  */
 
+// deanraccoon@gmail.com
+//
 // install the librados-dev package to get this
 #include <radosstriper/libradosstriper.h>
 #include <unistd.h>
@@ -31,18 +33,13 @@ void usage() {
 			"./striprados -p poolname -k key filename\n"
 			"DOWNLOAD FILE\n"
 			"./striprados -p poolname -g key filename\n"
+			"RM FILE\n"
+			"./striprados -p poolname -r key\n"
 			"LIST ALL FILES\n"
 			"./striprados -p poolname -l\n");
+	
 }
 
-/*
-#define NOOPS -1
-#define DONWLOAD 0
-#define UPLOAD 1
-#define LIST     2
-#define DELETE
-#define INFO
-*/
 enum act {
  NOOPS = -1,
  DONWLOAD,
@@ -64,6 +61,14 @@ int is_head_object(const char * entry) {
 	return 0;
 }
 
+struct entry_cache {
+
+};
+
+int is_cached(const char * entry) {
+	
+}
+
 int do_ls(rados_ioctx_t ioctx) {
 	int ret;
 	const char *entry;
@@ -77,6 +82,8 @@ int do_ls(rados_ioctx_t ioctx) {
 	}	
 	printf("===striper objects list===\n");
 	while(rados_objects_list_next(list_ctx, &entry, NULL) != -ENOENT) {
+		if (is_cached(entry) == 0)
+			continue;
 		if ((length = is_head_object(entry)) == 0)
 			continue;
 		memset(buf, 0, 128);
@@ -228,9 +235,18 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 		ret = -1;
 		goto out;
 	}
+	/* check the file size */
+	struct stat sb;
+	fstat(fd, &sb);
+	if (sb.st_size <= 0) {
+		ret = -1;
+		printf("the size of file %s is 0\n", filename);
+		goto checkfilefail;
+	}
 
 	if (overwrite == 1)
 		rados_striper_trunc(striper, key, 0);
+
 	count = BUFFSIZE;
 	while (count != 0 ) {
 
@@ -281,7 +297,7 @@ out1:
 		rados_aio_wait_for_safe(completion_list[i]);
 		rados_aio_release(completion_list[i]);
 	}
-	
+checkfilefail:	
 	close(fd);
 out:
 	destory_buffer_manager(&bm);
@@ -333,18 +349,11 @@ int do_get(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 	int count = 0;
 	uint64_t file_size;
 	int ret = 0;
-
 	memset(numbuf, 0, 128);
-	int fd = open(filename, O_WRONLY|O_CREAT|O_TRUNC, 0644);
-	if (fd < 0) {
-		printf("error writing file %s\n", filename);
-		return -1;
-	}
 
 	char *buf = malloc(BUFFSIZE);
 	if (buf == NULL) {
 		ret = -1;
-		goto out;
 	}
 	memset(buf, 0, BUFFSIZE);
 
@@ -352,7 +361,7 @@ int do_get(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 	char * sobj = malloc(strlen(key) + 17 + 1);
 	if (sobj == NULL) {
 		ret = -1;
-		goto out1;
+		goto out;
 	}
 
 	sprintf(sobj,"%s.%016d", key, 0);
@@ -361,7 +370,15 @@ int do_get(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 		sscanf(numbuf, "%lu", &file_size);
 	} else {
 		ret = -1;
-		goto out2;
+		printf("no remote file or the file is not striped: %s\n", key);
+		goto out1;;
+	}
+
+	int fd = open(filename, O_WRONLY|O_CREAT|O_TRUNC, 0644);
+	if (fd < 0) {
+		printf("error writing file %s\n", filename);
+		ret = -1;
+		goto out1;
 	}
 	
 	while (1) {
@@ -377,19 +394,18 @@ int do_get(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 		}
 		if (write(fd, buf, count) < 0){ 
 			ret = -1;
-			goto out2;
+			break;
 		}
 		offset += count;
 		printf("%lu%%\r", offset*100/file_size);
 		fflush(stdout);
 	}
 
-out2:
-	free(sobj);
-out1:	
-	free(buf);
-out:
 	close(fd);
+out1:
+	free(sobj);
+out:
+	free(buf);
 	return ret;
 }
 
