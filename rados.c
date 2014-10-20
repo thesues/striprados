@@ -50,11 +50,10 @@ enum act {
 };
 
 
-/* active set  = STRIPECOUNT * STRIPEUNIT */
-#define BUFFSIZE 64 << 20 /* 64M */
+#define BUFFSIZE 32 << 20 /* 32M */
 #define STRIPEUNIT 128 << 10 /* 128K */
 #define OBJECTSIZE 16 << 20 /* 16M */
-#define STRIPECOUNT 256 
+#define STRIPECOUNT 2
 
 
 
@@ -284,7 +283,7 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 			printf("failed to create completion\n");
 			goto out1;
 		}
-		if (next_num_writes >= capacity) {
+		if (next_num_writes == capacity - 1) {
 			completion_list =  realloc(completion_list, capacity << 1);
 			capacity = capacity << 1;
 		}
@@ -303,6 +302,7 @@ out1:
 		rados_aio_wait_for_safe(completion_list[i]);
 		rados_aio_release(completion_list[i]);
 	}
+
 checkfilefail:	
 	close(fd);
 out:
