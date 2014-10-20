@@ -131,8 +131,8 @@ int init_buffer_manager(struct buffer_manager *bm, int concurrent) {
 	}
 	bm->index = 0;
 	bm->max_buf_num = concurrent;
-	/* point to the last available buffer slot */
-	bm->current_buf_num = 0;
+	/* current alrealy allocated buf */
+	bm->current_buf_num = 1;
 	
 	/* initial mutex */
 	if (sem_init(&bm->mutex, 0, 1) != 0) {
@@ -274,6 +274,7 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 
 		if (count == 0) {
 			ret = 0;
+			put_buffer_back(&bm, buf);
 			break;
 		}
 
@@ -284,29 +285,33 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 			goto out1;
 		}
 		if (next_num_writes == capacity - 1) {
-			completion_list =  realloc(completion_list, capacity << 1);
+			completion_list =  realloc(completion_list, (capacity << 1) * sizeof(rados_completion_t));
 			capacity = capacity << 1;
 		}
-		completion_list[next_num_writes++] = my_completion;
+		completion_list[next_num_writes] = my_completion;
+		next_num_writes ++;
 
 		rados_striper_aio_write(striper, key, my_completion, buf, count, offset);
 
 		offset += count;
-		printf("%lu\n", offset);
+		printf("%lu%%\n", offset * 100 / sb.st_size);
 		fflush(stdout);
-
 	}
 	
 out1:
+
 	for(i = 0 ; i < next_num_writes ; i ++) {
 		rados_aio_wait_for_safe(completion_list[i]);
 		rados_aio_release(completion_list[i]);
 	}
+	if(completion_list)
+		free(completion_list);
 
 checkfilefail:	
 	close(fd);
 out:
 	destory_buffer_manager(&bm);
+
 	return ret;
 }
 
@@ -553,6 +558,9 @@ int main(int argc, const char **argv)
 			ret = -1;
 			goto out;
 	}
+	
+	if(ret == -1)
+		printf("error\n");
 
 out:
 	if (striper) {
@@ -561,7 +569,5 @@ out:
 	if (io_ctx) {
 		rados_ioctx_destroy(io_ctx);
 	}
-	if(rados)
-		rados_shutdown(rados);
 	return ret;
 }
