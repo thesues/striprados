@@ -49,7 +49,13 @@ enum act {
  INFO
 };
 
-#define BUFFSIZE 64<<20 /* 64M */
+
+/* active set  = STRIPECOUNT * STRIPEUNIT */
+#define BUFFSIZE 64 << 20 /* 64M */
+#define STRIPEUNIT 128 << 10 /* 128K */
+#define OBJECTSIZE 16 << 20 /* 16M */
+#define STRIPECOUNT 256 
+
 
 
 int is_head_object(const char * entry) {
@@ -66,7 +72,7 @@ struct entry_cache {
 };
 
 int is_cached(const char * entry) {
-	
+	return 1;
 }
 
 int do_ls(rados_ioctx_t ioctx) {
@@ -521,9 +527,9 @@ int main(int argc, const char **argv)
 	}
 
 
-	rados_striper_set_object_layout_stripe_unit(striper, 128<<10);
-	rados_striper_set_object_layout_object_size(striper, 8<<20);
-	rados_striper_set_object_layout_stripe_count(striper, 256);
+	rados_striper_set_object_layout_stripe_unit(striper, STRIPEUNIT);
+	rados_striper_set_object_layout_object_size(striper, OBJECTSIZE);
+	rados_striper_set_object_layout_stripe_count(striper, STRIPECOUNT);
 
 
 	switch (action) {
