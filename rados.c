@@ -294,7 +294,7 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 		rados_striper_aio_write(striper, key, my_completion, buf, count, offset);
 
 		offset += count;
-		printf("%lu%%\n", offset * 100 / sb.st_size);
+		printf("%lu%%\r", offset * 100 / sb.st_size);
 		fflush(stdout);
 	}
 	
@@ -569,5 +569,6 @@ out:
 	if (io_ctx) {
 		rados_ioctx_destroy(io_ctx);
 	}
+
 	return ret;
 }
