@@ -26,6 +26,7 @@
 #include <stdint.h>
 #include <semaphore.h>
 #include <assert.h>
+#include <signal.h>
 
 void usage() {
 	printf("Usage:\n"
@@ -213,6 +214,13 @@ void set_completion_complete(rados_completion_t cb, void *arg)
 }
 
 
+int quit = 0;
+
+void quit_handler(int i)
+{
+    quit = 1;
+}
+
 /* aio */
 int do_put2(rados_striper_t striper, const char *key, const char *filename, uint16_t concurrent, int overwrite) {
 	
@@ -226,6 +234,15 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 	rados_completion_t *completion_list = calloc(COMPLETION_LIST_SIZE, sizeof(rados_completion_t));
 	int32_t next_num_writes = 0;
 	uint32_t capacity = COMPLETION_LIST_SIZE;
+
+
+	struct sigaction sa;
+	memset( &sa, 0, sizeof(sa) );
+	sa.sa_handler = quit_handler;
+	sigfillset(&sa.sa_mask);
+	sigaction(SIGINT,&sa,NULL);
+	sigaction(SIGTERM,&sa,NULL);
+
 
 	ret = init_buffer_manager(&bm, concurrent);
 
@@ -253,7 +270,7 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 		rados_striper_trunc(striper, key, 0);
 
 	count = BUFFSIZE;
-	while (count != 0 ) {
+	while (count != 0 && !quit) {
 
 		/* it may block */
 		buf = get_free_buffer(&bm);
@@ -273,8 +290,8 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 		}
 
 		if (count == 0) {
-			ret = 0;
 			put_buffer_back(&bm, buf);
+			ret = 0;
 			break;
 		}
 
