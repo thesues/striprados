@@ -31,13 +31,13 @@
 void usage() {
 	printf("Usage:\n"
 			"UPLOAD FILE\n"
-			"./striprados -p poolname -k key filename\n"
+			"striprados -p poolname -u key filename\n"
 			"DOWNLOAD FILE\n"
-			"./striprados -p poolname -g key filename\n"
+			"striprados -p poolname -g key filename\n"
 			"RM FILE\n"
-			"./striprados -p poolname -r key\n"
+			"striprados -p poolname -r key\n"
 			"LIST ALL FILES\n"
-			"./striprados -p poolname -l\n");
+			"striprados -p poolname -l\n");
 	
 }
 
@@ -465,12 +465,12 @@ int main(int argc, const char **argv)
 	int ret = 0;
 	enum act action = NOOPS;
 
-	while ((opt = getopt(argc, (char* const *) argv, "p:k:g:lr:i:")) != -1) {
+	while ((opt = getopt(argc, (char* const *) argv, "p:u:g:lr:i:")) != -1) {
 		switch (opt) {
 			case 'p':
 				pool_name = optarg;
 				break;
-			case 'k':
+			case 'u':
 				action = UPLOAD;
 				key = optarg;
 				break;
