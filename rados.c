@@ -284,6 +284,7 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 		count = read(fd, buf, BUFFSIZE);
 
 		if (count < 0) {
+			put_buffer_back(&bm, buf);
 			printf("failed to read from file\n");
 			ret = -1;
 			break;
