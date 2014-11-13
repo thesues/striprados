@@ -318,10 +318,12 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 	
 out1:
 
+
 	for(i = 0 ; i < next_num_writes ; i ++) {
 		rados_aio_wait_for_safe(completion_list[i]);
 		rados_aio_release(completion_list[i]);
 	}
+	rados_striper_aio_flush(striper);
 	if(completion_list)
 		free(completion_list);
 
@@ -581,12 +583,12 @@ int main(int argc, const char **argv)
 		printf("error\n");
 
 out:
-	if (striper) {
+	if (striper) 
 		rados_striper_destroy(striper);
-	}
-	if (io_ctx) {
+	if (io_ctx) 
 		rados_ioctx_destroy(io_ctx);
-	}
+	if (rados) 
+	        rados_shutdown(rados);
 
 	return ret;
 }

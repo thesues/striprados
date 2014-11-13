@@ -1,4 +1,0 @@
-1. 不能同时用 striprados 上传相同key的文件
-2. striprados 上传相同key的文件，默认是overlapping
-3. BUG,rewrite do_get, upload empty file
-
