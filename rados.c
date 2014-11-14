@@ -53,7 +53,7 @@ enum act {
 
 #define BUFFSIZE 16 << 20 /* 16M */
 #define STRIPEUNIT 512 << 10 /* 512K */
-#define OBJECTSIZE 16 << 20 /*16M */
+#define OBJECTSIZE 32 << 20 /*32M */
 #define STRIPECOUNT 4 
 
 
@@ -562,7 +562,7 @@ int main(int argc, const char **argv)
 			ret = do_ls(io_ctx);
 			break;
 		case UPLOAD:
-			ret = do_put2(striper, key, filename, 4, 0);
+			ret = do_put2(striper, key, filename, 2, 0);
 			break;
 		case DONWLOAD:
 			ret = do_get(io_ctx, striper, key, filename);
