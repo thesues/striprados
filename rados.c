@@ -1,5 +1,5 @@
 // -*- mode:C++; tab-width:8; c-basic-offset:2; indent-tabs-mode:t -*-
-// vim: ts=8 sw=2 smarttab
+// vim: set ts=8 sw=2 smarttab
 /*
  * Ceph - scalable distributed file system
  *
@@ -13,6 +13,7 @@
 // deanraccoon@gmail.com
 //
 // install the librados-dev package to get this
+#define _LARGEFILE64_SOURCE /* used for lseek64 */
 #include <radosstriper/libradosstriper.h>
 #include <unistd.h>
 #include <stdio.h>
@@ -27,6 +28,7 @@
 #include <semaphore.h>
 #include <assert.h>
 #include <signal.h>
+#include <inttypes.h>
 
 void usage() {
 	printf("Usage:\n"
@@ -51,9 +53,9 @@ enum act {
 };
 
 
-#define BUFFSIZE 16 << 20 /* 16M */
-#define STRIPEUNIT 512 << 10 /* 512K */
-#define OBJECTSIZE 32 << 20 /*32M */
+#define BUFFSIZE (16 << 20) /* 16M */
+#define STRIPEUNIT (512 << 10) /* 512K */
+#define OBJECTSIZE (32 << 20) /*32M */
 #define STRIPECOUNT 4 
 
 
@@ -336,40 +338,83 @@ out:
 }
 
 /* sync io */
-int do_put(rados_striper_t striper, const char *key, const char *filename) {
-	char *buf = (char*)malloc(BUFFSIZE);
+int do_put(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const char *filename) {
+
 	struct stat sb;
 	int count;
-	uint64_t offset = 0;
+	int ret = 0;
+	uint64_t offset;
 	uint64_t file_size;
+	uint64_t object_size;
+	char numbuf[128];
+	memset(numbuf, 0, 128);
+
+	char *buf = (char*)malloc(BUFFSIZE);
+	if (buf == NULL) 
+	  return -1;
 
 	int fd = open(filename, O_RDONLY);
-	/* stack should be big enough to hold this buf*/
-	
 	if (fd < 0) {
 		printf("error reading file %s", filename);
-		return -1;
+		ret = -1;
+		goto out1;
 	}
+
+
 	count = BUFFSIZE;
 	fstat(fd,&sb);
 	file_size = sb.st_size;
-	while (count != 0 ) {
+
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa) );
+	sa.sa_handler = quit_handler;
+	sigfillset(&sa.sa_mask);
+	sigaction(SIGINT,&sa,NULL);
+	sigaction(SIGTERM,&sa,NULL);
+
+	char * sobj = malloc(strlen(key) + 17 + 1);
+	if (sobj == NULL) {
+	  ret = -1;
+	  goto out2;
+	}
+
+	sprintf(sobj,"%s.%016d", key, 0);
+
+	offset = 0;
+	if (rados_getxattr(ioctx, sobj, "striper.size", numbuf, 128) > 0) {
+		sscanf(numbuf, "%lu", &object_size);
+		if (object_size > BUFFSIZE) {
+			offset = object_size - BUFFSIZE;
+			printf("put continue from %" PRIu64 "\n", offset);
+		}
+	}
+
+	if (offset > 0)
+		lseek64(fd, offset, SEEK_SET);
+
+	while (count != 0 && !quit) {
 		count = read(fd, buf, BUFFSIZE);
 		if (count < 0) {
-			close(fd);
 			break;
 		}
 		if (count == 0) {
-			close(fd);
 			break;
 		}
-		rados_striper_write(striper, key, buf, count, offset);
+		ret = rados_striper_write(striper, key, buf, count, offset);
+		if (ret < 0)
+		  break;
 		offset += count;
 		printf("%lu%%\r", offset*100/file_size);
 		fflush(stdout);
 	}
+
+
+	free(sobj);
+out2:
+	close(fd);
+out1:
 	free(buf);
-	return 0;
+	return ret;
 }
 
 
@@ -416,8 +461,8 @@ int do_get(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 		count = rados_striper_read(striper, key, buf, BUFFSIZE, offset);
 		if (count < 0) {
 			printf("error reading rados file %s", key);
-			close(fd);
-			return -1;
+			ret = -1;
+			break;
 		}
 		if (count == 0) {
 			ret = 0;
@@ -562,7 +607,7 @@ int main(int argc, const char **argv)
 			ret = do_ls(io_ctx);
 			break;
 		case UPLOAD:
-			ret = do_put2(striper, key, filename, 2, 0);
+			ret = do_put(io_ctx, striper, key, filename);
 			break;
 		case DONWLOAD:
 			ret = do_get(io_ctx, striper, key, filename);
@@ -579,7 +624,7 @@ int main(int argc, const char **argv)
 			goto out;
 	}
 	
-	if(ret == -1)
+	if(ret < 0)
 		printf("error\n");
 
 out:
