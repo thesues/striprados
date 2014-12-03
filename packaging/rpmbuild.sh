@@ -2,7 +2,7 @@
 echo Building RPMs..
 GITROOT=`git rev-parse --show-toplevel`
 cd $GITROOT
-VER=0.1
+VER=0.2
 REL=`git rev-parse --short HEAD`git
 RPMTOPDIR=$GITROOT/rpm-build
 echo "Ver: $VER, Release: $REL"

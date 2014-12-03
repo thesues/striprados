@@ -53,9 +53,9 @@ enum act {
 };
 
 
-#define BUFFSIZE (16 << 20) /* 16M */
+#define BUFFSIZE (32 << 20) /* 32M */
 #define STRIPEUNIT (512 << 10) /* 512K */
-#define OBJECTSIZE (32 << 20) /*32M */
+#define OBJECTSIZE (64 << 20) /* 64M */
 #define STRIPECOUNT 4 
 
 
