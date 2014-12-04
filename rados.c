@@ -568,6 +568,8 @@ int main(int argc, const char **argv)
 	}
 	printf("set up a rados cluster object\n");
 
+	rados_conf_set(rados, "rados_mon_op_timeout", "30");
+	rados_conf_set(rados, "rados_osd_op_timeout", "90");
 	ret = rados_conf_read_file(rados, "/etc/ceph/ceph.conf");
 
 	ret = rados_connect(rados);
