@@ -382,7 +382,7 @@ int do_put(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 
 	offset = 0;
 	if (rados_getxattr(ioctx, sobj, "striper.size", numbuf, 128) > 0) {
-		sscanf(numbuf, "%lu", &object_size);
+		sscanf(numbuf, "%"SCNu64 , &object_size);
 		if (object_size > BUFFSIZE) {
 			offset = object_size - BUFFSIZE;
 			printf("put continue from %" PRIu64 "\n", offset);
