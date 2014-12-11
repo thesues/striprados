@@ -4,6 +4,7 @@ GITROOT=`git rev-parse --show-toplevel`
 cd $GITROOT
 VER=0.3
 REL=`git rev-parse --short HEAD`git
+REL=`git log --oneline|wc -l`.$REL
 RPMTOPDIR=$GITROOT/rpm-build
 echo "Ver: $VER, Release: $REL"
 
