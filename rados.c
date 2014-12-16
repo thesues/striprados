@@ -376,6 +376,8 @@ int do_put(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 	sigfillset(&sa.sa_mask);
 	sigaction(SIGINT,&sa,NULL);
 	sigaction(SIGTERM,&sa,NULL);
+	sigaction(SIGHUP, &sa, NULL);
+	sigaction(SIGQUIT, &sa, NULL);
 
 	char * sobj = malloc(strlen(key) + 17 + 1);
 	if (sobj == NULL) {
@@ -421,6 +423,10 @@ out2:
 	close(fd);
 out1:
 	free(buf);
+
+	/* if interrupted, return -1 */
+	if (quit == 1)
+		return -1;
 	return ret;
 }
 
