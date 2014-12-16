@@ -347,7 +347,7 @@ int do_put(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 
 	struct stat sb;
 	int count;
-	int ret = 0;
+	int ret = -1;
 	uint64_t offset;
 	uint64_t file_size;
 	uint64_t object_size;
@@ -410,7 +410,7 @@ int do_put(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 			break;
 		}
 		ret = rados_striper_write(striper, key, buf, count, offset);
-		if (ret < 0)
+		if (ret != 0)
 		  break;
 		offset += count;
 		debug("%lu%%\r", offset*100/file_size);
