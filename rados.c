@@ -642,9 +642,9 @@ out:
 	if (rados) 
 	        rados_shutdown(rados);
 
-	if(ret < 0)
-		output("fail\n");
-	else
+	if(ret == 0)
 		output("success\n");
+	else
+		output("fail\n");
 	return ret;
 }
