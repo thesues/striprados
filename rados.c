@@ -30,8 +30,12 @@
 #include <signal.h>
 #include <inttypes.h>
 
+
+#define debug(f, arg...) fprintf(stderr, f, ## arg)
+#define output(f, arg...) fprintf(stdout, f, ## arg)
+
 void usage() {
-	printf("Usage:\n"
+	debug("Usage:\n"
 			"UPLOAD FILE\n"
 			"striprados -p poolname -u key filename\n"
 			"DOWNLOAD FILE\n"
@@ -40,6 +44,7 @@ void usage() {
 			"striprados -p poolname -r key\n"
 			"LIST ALL FILES\n"
 			"striprados -p poolname -l\n");
+	output("fail\n");
 	
 }
 
@@ -85,10 +90,10 @@ int do_ls(rados_ioctx_t ioctx) {
 	int length;
 	ret = rados_objects_list_open(ioctx, &list_ctx);
 	if (ret < 0) {
-		printf("error reading list");
+		debug("error reading list");
 		return -1;
 	}	
-	printf("===striper objects list===\n");
+	debug("===striper objects list===\n");
 	while(rados_objects_list_next(list_ctx, &entry, NULL) != -ENOENT) {
 		if (is_cached(entry) == 0)
 			continue;
@@ -96,9 +101,9 @@ int do_ls(rados_ioctx_t ioctx) {
 			continue;
 		memset(buf, 0, 128);
 		if (rados_getxattr(ioctx, entry, "striper.size", buf, 128) > 0) {
-			printf("%-10.*s|%-10s\n", length, entry, buf);
+			output("%-10.*s|%-10s\n", length, entry, buf);
 		} else {
-			printf("can not get striper.size of %s", entry);
+			debug("can not get striper.size of %s", entry);
 		}
 		
 	}
@@ -122,13 +127,13 @@ int init_buffer_manager(struct buffer_manager *bm, int concurrent) {
 	int ret;
 	bm->free_buf = (char **)calloc(concurrent , sizeof(char*));
 	if (bm->free_buf == NULL) {
-		printf("failed to allocate free buffer manager\n");
+		debug("failed to allocate free buffer manager\n");
 		return -1;
 	}
 	bm->free_buf[0] = calloc(BUFFSIZE, sizeof(char));
 
 	if (bm->free_buf[0] == NULL) {
-		printf("failed to allocate the first buffer\n");
+		debug("failed to allocate the first buffer\n");
 		ret = -1;
 		goto out;
 	}
@@ -249,13 +254,13 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 	ret = init_buffer_manager(&bm, concurrent);
 
 	if (ret < 0) {
-		printf("failed to create buffer_manager\n");
+		debug("failed to create buffer_manager\n");
 		return -1;
 	}
 	
 	int fd = open(filename, O_RDONLY);
 	if (fd < 0) {
-		printf("error reading file %s", filename);
+		debug("error reading file %s", filename);
 		ret = -1;
 		goto out;
 	}
@@ -264,7 +269,7 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 	fstat(fd, &sb);
 	if (sb.st_size <= 0) {
 		ret = -1;
-		printf("the size of file %s is 0\n", filename);
+		debug("the size of file %s is 0\n", filename);
 		goto checkfilefail;
 	}
 
@@ -279,7 +284,7 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 
 		/* can not allocate new buffer lazily, continue */
 		if (buf == NULL) {
-			printf("failed to get buf\n");
+			debug("failed to get buf\n");
 			continue;
 		}
 
@@ -287,7 +292,7 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 
 		if (count < 0) {
 			put_buffer_back(&bm, buf);
-			printf("failed to read from file\n");
+			debug("failed to read from file\n");
 			ret = -1;
 			break;
 		}
@@ -301,7 +306,7 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 		/* use completion_list to store every completion_list  */
 		ret = rados_aio_create_completion((void *)buf, set_completion_complete, NULL, &my_completion);
 		if (ret < 0) {
-			printf("failed to create completion\n");
+			debug("failed to create completion\n");
 			goto out1;
 		}
 		if (next_num_writes == capacity - 1) {
@@ -314,7 +319,7 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 		rados_striper_aio_write(striper, key, my_completion, buf, count, offset);
 
 		offset += count;
-		printf("%lu%%\r", offset * 100 / sb.st_size);
+		debug("%lu%%\r", offset * 100 / sb.st_size);
 		fflush(stdout);
 	}
 	
@@ -355,7 +360,7 @@ int do_put(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 
 	int fd = open(filename, O_RDONLY);
 	if (fd < 0) {
-		printf("error reading file %s", filename);
+		debug("error reading file %s", filename);
 		ret = -1;
 		goto out1;
 	}
@@ -385,7 +390,7 @@ int do_put(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 		sscanf(numbuf, "%"SCNu64 , &object_size);
 		if (object_size > BUFFSIZE) {
 			offset = object_size - BUFFSIZE;
-			printf("put continue from %" PRIu64 "\n", offset);
+			debug("put continue from %" PRIu64 "\n", offset);
 		}
 	}
 
@@ -395,16 +400,18 @@ int do_put(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 	while (count != 0 && !quit) {
 		count = read(fd, buf, BUFFSIZE);
 		if (count < 0) {
+			ret = -1;
 			break;
 		}
 		if (count == 0) {
+			ret = 0;
 			break;
 		}
 		ret = rados_striper_write(striper, key, buf, count, offset);
 		if (ret < 0)
 		  break;
 		offset += count;
-		printf("%lu%%\r", offset*100/file_size);
+		debug("%lu%%\r", offset*100/file_size);
 		fflush(stdout);
 	}
 
@@ -446,13 +453,13 @@ int do_get(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 		sscanf(numbuf, "%lu", &file_size);
 	} else {
 		ret = -1;
-		printf("no remote file or the file is not striped: %s\n", key);
+		debug("no remote file or the file is not striped: %s\n", key);
 		goto out1;;
 	}
 
 	int fd = open(filename, O_WRONLY|O_CREAT|O_TRUNC, 0644);
 	if (fd < 0) {
-		printf("error writing file %s\n", filename);
+		debug("error writing file %s\n", filename);
 		ret = -1;
 		goto out1;
 	}
@@ -460,7 +467,7 @@ int do_get(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 	while (1) {
 		count = rados_striper_read(striper, key, buf, BUFFSIZE, offset);
 		if (count < 0) {
-			printf("error reading rados file %s", key);
+			debug("error reading rados file %s", key);
 			ret = -1;
 			break;
 		}
@@ -473,7 +480,7 @@ int do_get(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 			break;
 		}
 		offset += count;
-		printf("%lu%%\r", offset*100/file_size);
+		debug("%lu%%\r", offset*100/file_size);
 		fflush(stdout);
 	}
 
@@ -487,13 +494,13 @@ out:
 
 int do_delete(rados_striper_t striper, const char *key) {
 	int ret;
-	printf("deleting %s\n",key);
+	debug("deleting %s\n",key);
 	ret = rados_striper_remove(striper, key);
 	if (ret < 0) {
-		printf("%s delete failed\n", key);
+		debug("%s delete failed\n", key);
 		return -1;
 	}
-	printf("%s deleted\n",key);
+	debug("%s deleted\n",key);
 	return 0;
 }
 
@@ -562,11 +569,11 @@ int main(int argc, const char **argv)
 	rados_t rados = NULL;
 	ret = rados_create(&rados, "admin"); // just use the client.admin keyring
 	if (ret < 0) { // let's handle any error that might have come back
-		printf("couldn't initialize rados! error %d\n", ret);
+		debug("couldn't initialize rados! error %d\n", ret);
 		ret = EXIT_FAILURE;
 		goto out;
 	}
-	printf("set up a rados cluster object\n");
+	debug("set up a rados cluster object\n");
 
 	rados_conf_set(rados, "rados_mon_op_timeout", "30");
 	rados_conf_set(rados, "rados_osd_op_timeout", "90");
@@ -574,28 +581,28 @@ int main(int argc, const char **argv)
 
 	ret = rados_connect(rados);
 	if (ret < 0) {
-		printf("couldn't connect to cluster! error %d\n", ret);
+		debug("couldn't connect to cluster! error %d\n", ret);
 		ret = EXIT_FAILURE;
 		goto out;
 	}
-	printf("connected to the rados cluster\n");
+	debug("connected to the rados cluster\n");
 
 
 	ret = rados_ioctx_create(rados, pool_name, &io_ctx);
 	if (ret < 0) {
-		printf("couldn't set up ioctx! error %d\n", ret);
+		debug("couldn't set up ioctx! error %d\n", ret);
 		ret = EXIT_FAILURE;
 		goto out;
 	} else
-		printf("created an ioctx for our pool\n");
+		debug("created an ioctx for our pool\n");
 
 	ret = rados_striper_create(io_ctx, &striper);
 	if (ret < 0) {
-		printf("couldn't set up striper error %d\n", ret);
+		debug("couldn't set up striper error %d\n", ret);
 		ret = EXIT_FAILURE;
 		goto out;
 	} else {
-		printf("created a striper for our pool\n");
+		debug("created a striper for our pool\n");
 	}
 
 
@@ -621,13 +628,11 @@ int main(int argc, const char **argv)
 			ret = do_info(striper, key);
 			break;
 		default:
-			printf("wrong action\n");
+			output("fail\n");
 			ret = -1;
 			goto out;
 	}
 	
-	if(ret < 0)
-		printf("error\n");
 
 out:
 	if (striper) 
@@ -637,5 +642,9 @@ out:
 	if (rados) 
 	        rados_shutdown(rados);
 
+	if(ret < 0)
+		output("fail\n");
+	else
+		output("success\n");
 	return ret;
 }
