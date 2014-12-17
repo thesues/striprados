@@ -1,5 +1,5 @@
 cases=("10" "500" "1K" "2K" "4K" "5K" "10K" "128K" "129K" "4M" "8M" "9M" "16M" "65M" "127M" "257M")
-poolname="data"
+poolname="video"
 
 for i in ${cases[@]}
 do

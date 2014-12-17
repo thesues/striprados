@@ -350,7 +350,6 @@ int do_put(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 	int ret = -1;
 	uint64_t offset;
 	uint64_t file_size;
-	uint64_t object_size;
 	char numbuf[128];
 	memset(numbuf, 0, 128);
 
@@ -369,6 +368,10 @@ int do_put(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 	count = BUFFSIZE;
 	fstat(fd,&sb);
 	file_size = sb.st_size;
+	if (file_size < 3) {
+		ret = -1;
+		goto out2;
+	}
 
 	struct sigaction sa;
 	memset(&sa, 0, sizeof(sa) );
@@ -379,25 +382,14 @@ int do_put(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 	sigaction(SIGHUP, &sa, NULL);
 	sigaction(SIGQUIT, &sa, NULL);
 
-	char * sobj = malloc(strlen(key) + 17 + 1);
-	if (sobj == NULL) {
-	  ret = -1;
-	  goto out2;
-	}
 
-	sprintf(sobj,"%s.%016d", key, 0);
 
 	offset = 0;
-	if (rados_getxattr(ioctx, sobj, "striper.size", numbuf, 128) > 0) {
-		sscanf(numbuf, "%"SCNu64 , &object_size);
-		if (object_size > BUFFSIZE) {
-			offset = object_size - BUFFSIZE;
-			debug("put continue from %" PRIu64 "\n", offset);
-		}
+	ret = rados_striper_write(striper, key, "s", 2, file_size - 2);
+	if (ret < 0) {
+		goto out2;
 	}
 
-	if (offset > 0)
-		lseek64(fd, offset, SEEK_SET);
 
 	while (count != 0 && !quit) {
 		count = read(fd, buf, BUFFSIZE);
@@ -411,14 +403,12 @@ int do_put(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 		}
 		ret = rados_striper_write(striper, key, buf, count, offset);
 		if (ret != 0)
-		  break;
+			break;
 		offset += count;
 		debug("%lu%%\r", offset*100/file_size);
 		fflush(stdout);
 	}
 
-
-	free(sobj);
 out2:
 	close(fd);
 out1:
@@ -581,8 +571,8 @@ int main(int argc, const char **argv)
 	}
 	debug("set up a rados cluster object\n");
 
-	rados_conf_set(rados, "rados_mon_op_timeout", "30");
-	rados_conf_set(rados, "rados_osd_op_timeout", "90");
+	rados_conf_set(rados, "rados_mon_op_timeout", "60");
+	rados_conf_set(rados, "rados_osd_op_timeout", "180");
 	ret = rados_conf_read_file(rados, "/etc/ceph/ceph.conf");
 
 	ret = rados_connect(rados);
