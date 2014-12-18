@@ -243,14 +243,6 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 	uint32_t capacity = COMPLETION_LIST_SIZE;
 
 
-	struct sigaction sa;
-	memset( &sa, 0, sizeof(sa) );
-	sa.sa_handler = quit_handler;
-	sigfillset(&sa.sa_mask);
-	sigaction(SIGINT,&sa,NULL);
-	sigaction(SIGTERM,&sa,NULL);
-
-
 	ret = init_buffer_manager(&bm, concurrent);
 
 	if (ret < 0) {
@@ -373,16 +365,6 @@ int do_put(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 		goto out2;
 	}
 
-	struct sigaction sa;
-	memset(&sa, 0, sizeof(sa) );
-	sa.sa_handler = quit_handler;
-	sigfillset(&sa.sa_mask);
-	sigaction(SIGINT,&sa,NULL);
-	sigaction(SIGTERM,&sa,NULL);
-	sigaction(SIGHUP, &sa, NULL);
-	sigaction(SIGQUIT, &sa, NULL);
-
-
 
 	offset = 0;
 	ret = rados_striper_write(striper, key, "s", 2, file_size - 2);
@@ -460,7 +442,7 @@ int do_get(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 		goto out1;
 	}
 	
-	while (1) {
+	while (!quit) {
 		count = rados_striper_read(striper, key, buf, BUFFSIZE, offset);
 		if (count < 0) {
 			debug("error reading rados file %s", key);
@@ -485,6 +467,10 @@ out1:
 	free(sobj);
 out:
 	free(buf);
+
+	/* if interrupted, return -1 */
+	if (quit == 1)
+		return -1;
 	return ret;
 }
 
@@ -606,6 +592,15 @@ int main(int argc, const char **argv)
 	rados_striper_set_object_layout_object_size(striper, OBJECTSIZE);
 	rados_striper_set_object_layout_stripe_count(striper, STRIPECOUNT);
 
+
+	struct sigaction sa;
+	memset(&sa, 0, sizeof(sa) );
+	sa.sa_handler = quit_handler;
+	sigfillset(&sa.sa_mask);
+	sigaction(SIGINT,&sa,NULL);
+	sigaction(SIGTERM,&sa,NULL);
+	sigaction(SIGHUP, &sa, NULL);
+	sigaction(SIGQUIT, &sa, NULL);
 
 	switch (action) {
 		case LIST:
