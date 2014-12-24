@@ -64,6 +64,7 @@ enum act {
 #define STRIPECOUNT 4 
 
 
+int quit = 0;
 
 int is_head_object(const char * entry) {
 	const char *p;
@@ -94,7 +95,7 @@ int do_ls(rados_ioctx_t ioctx) {
 		return -1;
 	}	
 	debug("===striper objects list===\n");
-	while(rados_objects_list_next(list_ctx, &entry, NULL) != -ENOENT) {
+	while(!quit && rados_objects_list_next(list_ctx, &entry, NULL) != -ENOENT) {
 		if (is_cached(entry) == 0)
 			continue;
 		if ((length = is_head_object(entry)) == 0)
@@ -221,7 +222,6 @@ void set_completion_complete(rados_completion_t cb, void *arg)
 }
 
 
-int quit = 0;
 
 void quit_handler(int i)
 {
@@ -312,7 +312,7 @@ int do_put2(rados_striper_t striper, const char *key, const char *filename, uint
 
 		offset += count;
 		debug("%lu%%\r", offset * 100 / sb.st_size);
-		fflush(stdout);
+		fflush(stderr);
 	}
 	
 out1:
