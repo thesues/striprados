@@ -37,13 +37,15 @@
 void usage() {
 	debug("Usage:\n"
 			"UPLOAD FILE\n"
-			"striprados -p poolname -u key filename\n"
+			"striprados -p <poolname> -u <key> <filename>\n"
 			"DOWNLOAD FILE\n"
-			"striprados -p poolname -g key filename\n"
-			"RM FILE\n"
-			"striprados -p poolname -r key\n"
+			"striprados -p <poolname> -g <key> <filename>\n"
+			"DELETE SINGLE FILE\n"
+			"striprados -p <poolname> -r <key>\n"
+			"DELETE MULTIPLE FILES\n"
+			"striprados -p <poolname> -d <file-contains-keys>\n"
 			"LIST ALL FILES\n"
-			"striprados -p poolname -l\n");
+			"striprados -p <poolname> -l\n");
 	output("fail\n");
 	
 }
@@ -474,15 +476,80 @@ out:
 	return ret;
 }
 
-int do_delete(rados_striper_t striper, const char *key) {
+int do_delete(rados_striper_t striper, const char *key, const char * file) {
 	int ret;
-	debug("deleting %s\n",key);
-	ret = rados_striper_remove(striper, key);
-	if (ret < 0) {
-		debug("%s delete failed\n", key);
+	/* delete single key */
+	if (file == NULL) {
+		debug("deleting %s\n",key);
+		ret = rados_striper_remove(striper, key);
+		if (ret < 0) {
+			debug("%s delete failed\n", key);
+			return -1;
+		}
+		debug("%s deleted\n",key);
+		return 0;
+	}
+
+	/* delete key from file */
+	char *line = NULL;
+	char *real_key = NULL;
+	char *p = NULL;
+
+	size_t len = 0;
+	ssize_t read;
+	FILE *fp = fopen(file, "r");
+	int counts = 0;
+	if (fp == NULL) {
+		debug("can not open %s\n", file);
 		return -1;
 	}
-	debug("%s deleted\n",key);
+
+	while(!quit && (read = getline(&line, &len, fp)) != -1) {
+
+		/* get rid of newline character */
+		/* unix \n  */
+		/* dos \r\n */
+		if(line[read - 1] == '\n') {
+			line[read - 1] = '\0';
+			if (read >= 2 && line[read - 2 ] == '\r')
+				line[read -2 ] = '\0';
+		} else {
+			debug("read file line %s failed\n",  line);
+			return -1;
+		}
+
+		p = line;
+		/* skip space in the front */
+		while (*p == ' ' || *p == '\t')
+			p ++;
+		real_key = p;
+		/* skip space behind the real key */
+		while (*p != ' ' &&  *p != '\t' && *p != '\0')
+			p ++;
+		*p = '\0';
+
+		/* skip empty line */
+		if (strlen(real_key) < 1)
+			continue;
+
+		debug("deleting key:%s\n", real_key);
+		ret = rados_striper_remove(striper, real_key);
+		if (ret < 0) {
+			debug("deleting:%s failed\n", real_key);
+			continue;
+		}
+		counts ++;
+	}
+
+	if (line)
+		free(line);
+	fclose(fp);
+
+	if (counts == 0) {
+		debug("No Object was deleted\n");
+		return -1;
+	}
+
 	return 0;
 }
 
@@ -498,11 +565,16 @@ int main(int argc, const char **argv)
 	char *pool_name = NULL;
 	char *key = NULL;
 	const char *filename = NULL;
+	const char *to_delete_file_list = NULL;
 	int ret = 0;
 	enum act action = NOOPS;
 
-	while ((opt = getopt(argc, (char* const *) argv, "p:u:g:lr:i:")) != -1) {
+	while ((opt = getopt(argc, (char* const *) argv, "d:p:u:g:lr:i:")) != -1) {
 		switch (opt) {
+			case 'd':
+				action = DELETE;
+				to_delete_file_list = optarg;
+				break;
 			case 'p':
 				pool_name = optarg;
 				break;
@@ -531,6 +603,7 @@ int main(int argc, const char **argv)
 		}
 	}
 
+	/* check parameters */
 	if (action == UPLOAD || action  == DONWLOAD) {
 		if (argc == optind + 1 && pool_name) {
 			filename = argv[optind];
@@ -538,8 +611,13 @@ int main(int argc, const char **argv)
 			usage();
 			return EXIT_FAILURE;
 		}
-	} else if ((action == LIST || action == DELETE || action == INFO )&& pool_name) {
+	} else if ((action == LIST || action == DELETE || action == INFO ) && pool_name) {
+		/* pass */
 		
+	} else if (action == DELETE || to_delete_file_list != NULL) {
+		/* pass */
+	} else if (action == DELETE || key != NULL) {
+		/* pass */
 	} else {
 			usage();
 			return EXIT_FAILURE;
@@ -613,7 +691,7 @@ int main(int argc, const char **argv)
 			ret = do_get(io_ctx, striper, key, filename);
 			break; 
 		case DELETE:
-			ret = do_delete(striper, key);
+			ret = do_delete(striper, key, to_delete_file_list);
 			break;
 		case INFO:
 			ret = do_info(striper, key);
