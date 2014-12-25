@@ -29,6 +29,7 @@
 #include <assert.h>
 #include <signal.h>
 #include <inttypes.h>
+#include <time.h>
 
 
 #define debug(f, arg...) fprintf(stderr, f, ## arg)
@@ -553,8 +554,18 @@ int do_delete(rados_striper_t striper, const char *key, const char * file) {
 	return 0;
 }
 
-/* not implemetated */
-int do_info() {
+int do_info(rados_striper_t striper, const char *key) {
+	uint64_t size;
+	time_t mod_time;
+	int ret;
+	char buffer[50];
+	ret = rados_striper_stat(striper, key, &size, &mod_time);
+	if (ret < 0) {
+		debug("no such object\n");
+		return -1;
+	}
+	strftime(buffer, 50, "%Y/%m/%d-%H:%M:%S", localtime(&mod_time));
+	output("%-s|%"PRIu64"|%s\n", key, size, buffer);
 	return 0;
 }
 
