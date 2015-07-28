@@ -46,7 +46,9 @@ void usage() {
 			"DELETE MULTIPLE FILES\n"
 			"striprados -p <poolname> -d <file-contains-keys>\n"
 			"LIST ALL FILES\n"
-			"striprados -p <poolname> -l\n");
+			"striprados -p <poolname> -l\n"
+			"ERASE OLD VER FILES SINCE DAYS GOES\n"
+			"striprados -p <poolname> -e <days>\n");
 	output("fail\n");
 	
 }
@@ -57,7 +59,8 @@ enum act {
  UPLOAD,
  LIST ,
  DELETE,
- INFO
+ INFO,
+ CLEAR
 };
 
 
@@ -77,6 +80,15 @@ int is_head_object(const char * entry) {
 	}
 	return 0;
 }
+
+
+int is_ver_object(const char * obj_name){
+	if (strncmp(obj_name, "ver_", 4) == 0)
+		return 1;
+	else
+		return 0;
+}
+
 
 struct entry_cache {
 
@@ -569,6 +581,51 @@ int do_info(rados_striper_t striper, const char *key) {
 	return 0;
 }
 
+int do_clear_old_files(rados_striper_t striper, rados_ioctx_t ioctx, const char *key) {
+	int ret;
+	const char *entry;
+	rados_list_ctx_t list_ctx;
+	char buf[128];
+	int length;
+	uint64_t size;
+	time_t mod_time;
+	time_t now_time;
+	int date_of_expiry = atoi(key)*24*60*60;
+	ret = rados_objects_list_open(ioctx, &list_ctx);
+	if (ret < 0) {
+        	debug("error reading list");
+        	return -1;
+	}
+	debug("===ver objects to be delete ===\n");
+	while(!quit && rados_objects_list_next(list_ctx, &entry, NULL) != -ENOENT) {
+		if (is_cached(entry) == 0)
+			continue;
+		if ((length = is_head_object(entry)) == 0)
+			continue;
+		memset(buf, 0, sizeof(buf));
+		strncpy(buf, entry, length);
+		if (!is_ver_object(buf))
+			continue;
+		ret = rados_striper_stat(striper, buf, &size, &mod_time);
+		if (ret < 0) {
+			debug("no such object\n");
+			return -1;
+		}
+		time(&now_time);
+		if ((now_time - mod_time) > date_of_expiry){
+			ret = rados_striper_remove(striper, buf);
+			if (ret < 0) {
+				debug("%s delete failed\n", buf);
+				return -1;
+			}
+			debug("%s\n",buf);
+		}
+	}
+	debug("===ver objects delete complete ===\n");
+	rados_objects_list_close(list_ctx);
+	return 0;
+}
+
 int main(int argc, const char **argv)
 {
 
@@ -580,7 +637,7 @@ int main(int argc, const char **argv)
 	int ret = 0;
 	enum act action = NOOPS;
 
-	while ((opt = getopt(argc, (char* const *) argv, "d:p:u:g:lr:i:")) != -1) {
+	while ((opt = getopt(argc, (char* const *) argv, "d:p:u:g:lr:i:e:")) != -1) {
 		switch (opt) {
 			case 'd':
 				action = DELETE;
@@ -608,6 +665,10 @@ int main(int argc, const char **argv)
 				action = INFO;
 				key = optarg;
 				break;
+			case 'e':
+				action = CLEAR;
+				key = optarg;
+				break;
 			default:
 				usage();
 				return EXIT_FAILURE;
@@ -628,6 +689,8 @@ int main(int argc, const char **argv)
 	} else if (action == DELETE || to_delete_file_list != NULL) {
 		/* pass */
 	} else if (action == DELETE || key != NULL) {
+		/* pass */
+	} else if (action == CLEAR || key != NULL) {
 		/* pass */
 	} else {
 			usage();
@@ -706,6 +769,9 @@ int main(int argc, const char **argv)
 			break;
 		case INFO:
 			ret = do_info(striper, key);
+			break;
+		case CLEAR:
+			ret = do_clear_old_files(striper, io_ctx, key);
 			break;
 		default:
 			output("fail\n");
