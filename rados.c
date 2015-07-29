@@ -382,11 +382,6 @@ int do_put(rados_ioctx_t ioctx, rados_striper_t striper, const char *key, const 
 
 
 	offset = 0;
-	ret = rados_striper_write(striper, key, "s", 2, file_size - 2);
-	if (ret < 0) {
-		goto out2;
-	}
-
 
 	while (count != 0 && !quit) {
 		count = read(fd, buf, BUFFSIZE);
@@ -759,7 +754,7 @@ int main(int argc, const char **argv)
 			ret = do_ls(io_ctx);
 			break;
 		case UPLOAD:
-			ret = do_put(io_ctx, striper, key, filename);
+			ret = do_put2(striper, key, filename, 4, 0);
 			break;
 		case DONWLOAD:
 			ret = do_get(io_ctx, striper, key, filename);
