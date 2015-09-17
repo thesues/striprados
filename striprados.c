@@ -6,7 +6,7 @@
  * This is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
  * License version 2.1, as published by the Free Software
- * Foundation.  See file COPYING.
+ * Foundation.	See file COPYING.
  * Copyright 2013 Inktank
  */
 
@@ -30,7 +30,9 @@
 #include <signal.h>
 #include <inttypes.h>
 #include <time.h>
-
+#include <pthread.h>
+#include "threadpool.h"
+#include "list.h"
 
 #define debug(f, arg...) fprintf(stderr, f, ## arg)
 #define output(f, arg...) fprintf(stdout, f, ## arg)
@@ -42,16 +44,31 @@ void usage() {
 			"DOWNLOAD FILE\n"
 			"striprados -p <poolname> -g <key> <filename>\n"
 			"DELETE SINGLE FILE\n"
-			"striprados -p <poolname> -r <key>\n"
+			"striprados -p <poolname> -r <key> [-f]\n"
 			"DELETE MULTIPLE FILES\n"
-			"striprados -p <poolname> -d <file-contains-keys>\n"
+			"striprados -p <poolname> -d <file-contains-keys> [-f]\n"
 			"LIST ALL FILES\n"
 			"striprados -p <poolname> -l\n"
 			"ERASE OLD VER FILES SINCE DAYS GOES\n"
-			"striprados -p <poolname> -e <days>\n");
+			"striprados -p <poolname> -e <days> [-f] [-m]\n");
 	output("fail\n");
 	
 }
+typedef struct {
+	struct list_head job_list;
+	pthread_mutex_t job_mutex;
+	int count;
+}remove_list,*remove_list_t;
+
+typedef struct{
+	struct list_head list;
+	char *oid;
+}remove_node,*remove_node_t;
+
+typedef struct{
+	rados_ioctx_t io_ctx;
+	rados_striper_t striper;
+}rm_args,*rm_args_t;
 
 enum act {
  NOOPS = -1,
@@ -71,6 +88,10 @@ enum act {
 
 
 int quit = 0;
+remove_list rlist;
+int force = 0;
+int multi = 0;
+
 
 int is_head_object(const char * entry) {
 	const char *p;
@@ -89,6 +110,55 @@ int is_ver_object(const char * obj_name){
 		return 0;
 }
 
+int try_break_lock(rados_ioctx_t io_ctx, rados_striper_t striper, char *oid){
+	int exclusive;
+	char tag[1024];
+	char clients[1024];
+	char cookies[1024];
+	char addresses[1024];
+	int ret = 0;
+	size_t tag_len = 1024;
+	size_t clients_len = 1024;
+	size_t cookies_len = 1024;
+	size_t addresses_len = 1024;
+	char *firstObjOid = NULL;
+	char *tail = ".0000000000000000";
+	firstObjOid = malloc(strlen(oid)+strlen(tail)+1);
+	strcpy(firstObjOid, oid);
+	strcat(firstObjOid, tail);
+	ret = rados_list_lockers(io_ctx, firstObjOid, "striper.lock", &exclusive, tag, &tag_len, clients, &clients_len, cookies, &cookies_len, addresses, &addresses_len);
+	if (ret < 0){
+		debug("%s rados_list_lockers failed errno: %d \n", oid, ret);
+		goto out;
+	}
+	ret = rados_break_lock(io_ctx, firstObjOid, "striper.lock", clients, cookies);
+	if (ret < 0){
+		debug("%s rados_break_lock failed errno: %d \n", oid, ret);
+		goto out;
+	}
+out:
+	free(firstObjOid);
+	return ret;
+}
+
+int striprados_remove(rados_ioctx_t io_ctx, rados_striper_t striper, char *oid){
+	int ret;
+	int retry = 0;
+retry:
+	ret = rados_striper_remove(striper, oid);
+	if (ret == -EBUSY && force == 1 && retry == 0){
+		ret = try_break_lock(io_ctx,striper,oid);
+		retry++;
+		if (ret == 0)
+			goto retry;
+	}
+	if (ret < 0) {
+		debug("%s delete failed errno: %d \n", oid, ret);
+	}else{
+		debug("%s deleted\n",oid);
+	}
+	return ret;
+}
 
 struct entry_cache {
 
@@ -108,7 +178,7 @@ int do_ls(rados_ioctx_t ioctx) {
 	if (ret < 0) {
 		debug("error reading list");
 		return -1;
-	}	
+	}
 	debug("===striper objects list===\n");
 	while(!quit && rados_objects_list_next(list_ctx, &entry, NULL) != -ENOENT) {
 		if (is_cached(entry) == 0)
@@ -121,9 +191,7 @@ int do_ls(rados_ioctx_t ioctx) {
 		} else {
 			debug("can not get striper.size of %s", entry);
 		}
-		
 	}
-	
 	rados_objects_list_close(list_ctx);
 	return 0;
 }
@@ -169,9 +237,7 @@ int init_buffer_manager(struct buffer_manager *bm, int concurrent) {
 		ret = -errno;
 		goto out2;
 	}
-
 	return 0;
-
 out2:
 	sem_destroy(&bm->mutex);
 out1:
@@ -179,7 +245,6 @@ out1:
 out:
 	free(bm->free_buf);
 	return ret;
-	
 }
 
 /* we must be sure that all buffer has been reclaimed by put_buffer_back */
@@ -224,7 +289,6 @@ void put_buffer_back(struct buffer_manager *bm, char *buf) {
 	bm->index++;
 	bm->free_buf[bm->index] = buf;
 	sem_post(&bm->mutex);
-
 	sem_post(&bm->available_bufs);
 }
 
@@ -240,7 +304,7 @@ void set_completion_complete(rados_completion_t cb, void *arg)
 
 void quit_handler(int i)
 {
-    quit = 1;
+	quit = 1;
 }
 
 /* aio */
@@ -484,12 +548,12 @@ out:
 	return ret;
 }
 
-int do_delete(rados_striper_t striper, const char *key, const char * file) {
+int do_delete(rados_ioctx_t ioctx, rados_striper_t striper, char *key, const char * file) {
 	int ret;
 	/* delete single key */
 	if (file == NULL) {
 		debug("deleting %s\n",key);
-		ret = rados_striper_remove(striper, key);
+		ret = striprados_remove(ioctx, striper, key);
 		if (ret < 0) {
 			debug("%s delete failed\n", key);
 			return -1;
@@ -515,7 +579,7 @@ int do_delete(rados_striper_t striper, const char *key, const char * file) {
 	while(!quit && (read = getline(&line, &len, fp)) != -1) {
 
 		/* get rid of newline character */
-		/* unix \n  */
+		/* unix \n	*/
 		/* dos \r\n */
 		if(line[read - 1] == '\n') {
 			line[read - 1] = '\0';
@@ -541,7 +605,7 @@ int do_delete(rados_striper_t striper, const char *key, const char * file) {
 			continue;
 
 		debug("deleting key:%s\n", real_key);
-		ret = rados_striper_remove(striper, real_key);
+		ret = striprados_remove(ioctx, striper, real_key);
 		if (ret < 0) {
 			debug("deleting:%s failed\n", real_key);
 			continue;
@@ -576,7 +640,64 @@ int do_info(rados_striper_t striper, const char *key) {
 	return 0;
 }
 
-int do_clear_old_files(rados_striper_t striper, rados_ioctx_t ioctx, const char *key) {
+void add_obj_to_list(remove_list_t plist, char *oid){
+	remove_node_t pnode = (remove_node_t)malloc(sizeof(remove_node));
+	if (pnode == NULL) {
+		debug("malloc failed in %d",__LINE__);
+		return;
+	}
+	pnode->oid = strdup(oid);
+	pthread_mutex_lock(&plist->job_mutex);
+	list_add_tail(&pnode->list,&plist->job_list);
+	plist->count++;
+	pthread_mutex_unlock(&plist->job_mutex);
+}
+
+char *get_obj_from_list(remove_list_t plist)
+{
+	remove_node_t pos,n;
+	char *ret = NULL;
+	int find = 0;
+	pthread_mutex_lock(&plist->job_mutex);
+	list_for_each_entry_safe(pos, n, &plist->job_list, list){
+		find = 1;
+		ret = pos->oid;
+		break;
+	}
+	if (find == 1){
+		
+		list_del(&pos->list);
+		plist->count--;
+		free(pos);
+	}
+	pthread_mutex_unlock(&plist->job_mutex);
+	return ret;
+}
+
+void process_remove_ver_objs(void *arg){
+	rm_args_t agrs = (rm_args_t)arg;
+	rados_ioctx_t io_ctx = agrs->io_ctx;
+	rados_striper_t striper = agrs->striper;
+	char *oid = NULL;
+	int ret = 0;
+	while(1){
+		oid = get_obj_from_list(&rlist);
+		if (oid == NULL){
+			break;
+		}
+		ret = striprados_remove(io_ctx, striper, oid);
+		free(oid);
+		if (ret != 0){
+			break;
+		}
+			
+	}
+	free(arg);
+	return;
+}
+
+
+int do_clear_old_files(rados_striper_t striper, rados_ioctx_t ioctx, const char *key, int force) {
 	int ret;
 	const char *entry;
 	rados_list_ctx_t list_ctx;
@@ -586,12 +707,15 @@ int do_clear_old_files(rados_striper_t striper, rados_ioctx_t ioctx, const char 
 	time_t mod_time;
 	time_t now_time;
 	int date_of_expiry = atoi(key)*24*60*60;
+	rm_args_t args = NULL;
+	threadpool tp;
+	tp = create_threadpool(50);
 	ret = rados_objects_list_open(ioctx, &list_ctx);
 	if (ret < 0) {
-        	debug("error reading list");
-        	return -1;
+			debug("error reading list");
+			return -1;
 	}
-	debug("===ver objects to be delete ===\n");
+	debug("===start delete objects ===\n");
 	while(!quit && rados_objects_list_next(list_ctx, &entry, NULL) != -ENOENT) {
 		if (is_cached(entry) == 0)
 			continue;
@@ -608,16 +732,24 @@ int do_clear_old_files(rados_striper_t striper, rados_ioctx_t ioctx, const char 
 		}
 		time(&now_time);
 		if ((now_time - mod_time) > date_of_expiry){
-			ret = rados_striper_remove(striper, buf);
-			if (ret < 0) {
-				debug("%s delete failed\n", buf);
-				return -1;
+			if (multi){
+				add_obj_to_list(&rlist, buf);
+				args = (rm_args_t)malloc(sizeof(rm_args));
+				args->io_ctx = ioctx;
+				args->striper = striper;
+				dispatch_threadpool(tp, process_remove_ver_objs, (void *)args);
+			}else{
+				striprados_remove(ioctx, striper, buf);
 			}
-			debug("%s\n",buf);
 		}
 	}
-	debug("===ver objects delete complete ===\n");
+	
 	rados_objects_list_close(list_ctx);
+	while(!list_empty(&rlist.job_list)){
+		sleep(5);
+	}
+	destroy_threadpool(tp);
+	debug("===all objects deleted complete ===\n");
 	return 0;
 }
 
@@ -631,8 +763,13 @@ int main(int argc, const char **argv)
 	const char *to_delete_file_list = NULL;
 	int ret = 0;
 	enum act action = NOOPS;
-
-	while ((opt = getopt(argc, (char* const *) argv, "d:p:u:g:lr:i:e:")) != -1) {
+	pthread_mutex_init(&rlist.job_mutex, NULL);
+	INIT_LIST_HEAD(&rlist.job_list);
+	rlist.count = 0;
+	time_t startT, endT;
+	double totalT;
+	startT = time(NULL);
+	while ((opt = getopt(argc, (char* const *) argv, "d:p:u:g:mflr:i:e:")) != -1) {
 		switch (opt) {
 			case 'd':
 				action = DELETE;
@@ -640,6 +777,9 @@ int main(int argc, const char **argv)
 				break;
 			case 'p':
 				pool_name = optarg;
+				break;
+			case 'f':
+				force = 1;
 				break;
 			case 'u':
 				action = UPLOAD;
@@ -664,6 +804,9 @@ int main(int argc, const char **argv)
 				action = CLEAR;
 				key = optarg;
 				break;
+			case 'm':
+				multi = 1;
+				break;
 			default:
 				usage();
 				return EXIT_FAILURE;
@@ -671,7 +814,7 @@ int main(int argc, const char **argv)
 	}
 
 	/* check parameters */
-	if (action == UPLOAD || action  == DONWLOAD) {
+	if (action == UPLOAD || action	== DONWLOAD) {
 		if (argc == optind + 1 && pool_name) {
 			filename = argv[optind];
 		} else {
@@ -760,13 +903,13 @@ int main(int argc, const char **argv)
 			ret = do_get(io_ctx, striper, key, filename);
 			break; 
 		case DELETE:
-			ret = do_delete(striper, key, to_delete_file_list);
+			ret = do_delete(io_ctx, striper, key, to_delete_file_list);
 			break;
 		case INFO:
 			ret = do_info(striper, key);
 			break;
 		case CLEAR:
-			ret = do_clear_old_files(striper, io_ctx, key);
+			ret = do_clear_old_files(striper, io_ctx, key, force);
 			break;
 		default:
 			output("fail\n");
@@ -781,8 +924,10 @@ out:
 	if (io_ctx) 
 		rados_ioctx_destroy(io_ctx);
 	if (rados) 
-	        rados_shutdown(rados);
-
+			rados_shutdown(rados);
+	endT = time(NULL);
+	totalT = endT-startT;
+	debug("time cost %lf second\n",totalT);
 	if(ret == 0)
 		output("success\n");
 	else

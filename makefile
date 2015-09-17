@@ -1,5 +1,5 @@
-striprados:rados.c
-	cc  -Wall -g -o$@ -lradosstriper rados.c
+striprados:striprados.c
+	cc  -Wall -g -o$@ -lradosstriper striprados.c threadpool.c
 install:
 	install -D striprados $$DESTDIR/usr/bin/striprados
 clean:
